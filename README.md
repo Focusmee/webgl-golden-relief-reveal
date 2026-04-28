@@ -1,6 +1,8 @@
 # 🗽鼠标交互式浮雕效果实现说明
 
-注意：本效果参照https://wild.as/labs/building-wild-week-athens实现，并非一比一实现，只是个人学习。
+注意：本效果参照https://wild.as/labs/building-wild-week-athens
+
+并非一比一实现，只是个人学习。
 
 ## 🎯1. 效果目标
 
