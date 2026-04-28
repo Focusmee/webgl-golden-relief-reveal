@@ -95,7 +95,7 @@ return normalize(n);
 
 这个是我上传到网站给的图，这个没用Gemini生成因为AI比较不可控。
 
-![image-20260429014502406](D:\Projects\Test_WildWeek\webgl-golden-relief-reveal\assets\image-20260429014502406.png)
+![image-20260429014502406](assets\image-20260429014502406.png)
 
 同时我将上图的文件中提出的参数作出解释：
 
@@ -201,7 +201,7 @@ float specMask = smoothstep(u_specMaskLow, u_specMaskHigh, rawMask);
 生成黑白遮罩图：人物浮雕：白色 255底板：深灰 35–80外部背景：黑色 0
 ```
 
-![image-20260429015113392](D:\Projects\Test_WildWeek\webgl-golden-relief-reveal\assets\image-20260429015113392.png)
+![image-20260429015113392](assets\image-20260429015113392.png)
 
 ---
 
@@ -660,4 +660,4 @@ specularPower / specularIntensity 决定金属高光质量
 
 祝你玩的愉快🫰😉也感谢Wild能带来如此惊艳的作品！！！！！！！！
 
-最后我的效果如下：![image-20260429022333722](D:\Projects\Test_WildWeek\webgl-golden-relief-reveal\assets\image-20260429022333722.png)
+最后我的效果如下：![image-20260429022333722](assets\image-20260429022333722.png)
