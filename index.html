@@ -1,0 +1,668 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bright Gold Relief Reveal</title>
+
+  <style>
+    :root {
+      --bg: #d8d6cd;
+      --text: #24231f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 24%, #efeee9 0%, var(--bg) 45%, #bcb9ad 100%);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+    }
+
+    .stage {
+      width: min(1120px, 94vw);
+      height: min(760px, 88vh);
+      position: relative;
+      border-radius: 32px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 35%, #f3f0e5 0%, #ddd9ca 52%, #bdb9aa 100%);
+      box-shadow:
+        0 42px 120px rgba(0, 0, 0, 0.22),
+        inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: none;
+    }
+
+    .cursor {
+      position: absolute;
+      z-index: 10;
+      left: 50%;
+      top: 50%;
+      width: 20px;
+      height: 20px;
+      border: 1px solid rgba(255, 255, 255, 0.95);
+      border-radius: 999px;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      mix-blend-mode: difference;
+      opacity: 0;
+      transition: opacity 0.18s ease;
+    }
+
+    .stage:hover .cursor {
+      opacity: 1;
+    }
+
+    .ui {
+      position: absolute;
+      left: 20px;
+      right: 20px;
+      bottom: 18px;
+      z-index: 5;
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      pointer-events: none;
+      color: rgba(28, 27, 24, 0.56);
+      font-size: 13px;
+      letter-spacing: 0.03em;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="stage" id="stage">
+    <canvas id="canvas"></canvas>
+    <div class="cursor" id="cursor"></div>
+    <div class="ui">
+      <span>bright gold material reveal</span>
+      <span>relief + normal + mask</span>
+    </div>
+  </main>
+
+  <script>
+    const BASE_URL = './relief.png';
+    const NORMAL_URL = './normal.png';
+    const MASK_URL = './mask.png';
+
+    const SETTINGS = {
+      reliefScale: 0.92,
+
+      // 如果凹凸方向看起来反了，把 true 改成 false。
+      // true：反转 G 通道，常用于 DirectX normal。
+      // false：不反转 G 通道，常用于 OpenGL normal。
+      flipNormalY: true,
+
+      // 亮黄金：增加法线扰动，让高光更容易沿浮雕细节出现。
+      normalStrength: 1.42,
+
+      // 亮黄金光照：比上一版更亮，但保留棕色暗部，避免发白。
+      ambient: 0.24,
+      lightPower: 1.45,
+      lightHeight: 0.86,
+
+      // 鼠标影响范围。
+      highlightRadius: 0.34,
+      revealSoftness: 0.22,
+
+      // 高光更集中，亮但不大片泛白。
+      specularPower: 88.0,
+      specularIntensity: 0.95,
+      fresnelPower: 4.8,
+      fresnelIntensity: 0.28,
+
+      // mask 控制。
+      // 你的 mask 如果是：人物白、底板灰、外部黑，这组值适合。
+      // 如果整块底板仍然太亮，把 specMaskLow 提高到 0.70。
+      revealMaskLow: 0.16,
+      revealMaskHigh: 0.88,
+      specMaskLow: 0.58,
+      specMaskHigh: 0.98,
+
+      // 白色浮雕底色。
+      plasterDark: [0.56, 0.55, 0.51],
+      plasterLight: [0.90, 0.88, 0.82],
+
+      // 亮黄金材质：暗部仍是棕金，中间调更亮，高光暖黄。
+      goldDark: [0.16, 0.075, 0.025],
+      goldMid: [0.95, 0.58, 0.13],
+      goldLight: [1.00, 0.82, 0.34],
+
+      background: [0.84, 0.82, 0.76]
+    };
+
+    const stage = document.getElementById('stage');
+    const canvas = document.getElementById('canvas');
+    const cursor = document.getElementById('cursor');
+
+    const gl = canvas.getContext('webgl2', {
+      antialias: true,
+      premultipliedAlpha: false
+    });
+
+    if (!gl) {
+      throw new Error('WebGL2 is not supported by this browser.');
+    }
+
+    const vertexSource = `#version 300 es
+      precision highp float;
+
+      in vec2 a_position;
+      out vec2 v_uv;
+
+      uniform vec2 u_imageScale;
+
+      void main() {
+        vec2 p = a_position * u_imageScale;
+
+        v_uv = a_position * 0.5 + 0.5;
+        v_uv.y = 1.0 - v_uv.y;
+
+        gl_Position = vec4(p, 0.0, 1.0);
+      }
+    `;
+
+    const fragmentSource = `#version 300 es
+      precision highp float;
+
+      in vec2 v_uv;
+      out vec4 outColor;
+
+      uniform sampler2D u_base;
+      uniform sampler2D u_normal;
+      uniform sampler2D u_mask;
+
+      uniform vec2 u_lightUv;
+      uniform vec2 u_resolution;
+      uniform float u_lightActive;
+
+      uniform float u_flipNormalY;
+      uniform float u_normalStrength;
+
+      uniform float u_ambient;
+      uniform float u_lightPower;
+      uniform float u_lightHeight;
+
+      uniform float u_highlightRadius;
+      uniform float u_revealSoftness;
+
+      uniform float u_specularPower;
+      uniform float u_specularIntensity;
+      uniform float u_fresnelPower;
+      uniform float u_fresnelIntensity;
+
+      uniform float u_revealMaskLow;
+      uniform float u_revealMaskHigh;
+      uniform float u_specMaskLow;
+      uniform float u_specMaskHigh;
+
+      uniform vec3 u_plasterDark;
+      uniform vec3 u_plasterLight;
+
+      uniform vec3 u_goldDark;
+      uniform vec3 u_goldMid;
+      uniform vec3 u_goldLight;
+
+      uniform vec3 u_background;
+
+      float luminance(vec3 c) {
+        return dot(c, vec3(0.2126, 0.7152, 0.0722));
+      }
+
+      vec3 srgbToLinear(vec3 c) {
+        return pow(max(c, 0.0), vec3(2.2));
+      }
+
+      vec3 linearToSrgb(vec3 c) {
+        return pow(max(c, 0.0), vec3(1.0 / 2.2));
+      }
+
+      vec3 getNormal(vec2 uv) {
+        vec3 n = texture(u_normal, uv).rgb * 2.0 - 1.0;
+
+        n.y = mix(n.y, -n.y, u_flipNormalY);
+        n.xy *= u_normalStrength;
+
+        return normalize(n);
+      }
+
+      vec3 goldEnvironment(vec3 normal, vec3 viewDir) {
+        vec3 reflectDir = reflect(-viewDir, normal);
+
+        float upper = smoothstep(-0.20, 0.85, reflectDir.y);
+        float side = smoothstep(0.10, 0.95, abs(reflectDir.x));
+        float front = smoothstep(-0.20, 0.95, reflectDir.z);
+
+        vec3 warmTop = vec3(0.96, 0.62, 0.18);
+        vec3 brownSide = vec3(0.34, 0.17, 0.052);
+        vec3 darkFront = vec3(0.050, 0.032, 0.018);
+
+        vec3 env = mix(darkFront, warmTop, upper);
+        env = mix(env, brownSide, side * 0.38);
+        env += vec3(1.0, 0.76, 0.26) * front * 0.095;
+
+        return env;
+      }
+
+      void main() {
+        vec4 baseSample = texture(u_base, v_uv);
+        vec3 baseLinear = srgbToLinear(baseSample.rgb);
+
+        float rawMask = texture(u_mask, v_uv).r;
+
+        // revealMask：允许变金属的区域。
+        // specMask：允许出现强黄金高光的区域。
+        float revealMask = smoothstep(u_revealMaskLow, u_revealMaskHigh, rawMask);
+        float specMask = smoothstep(u_specMaskLow, u_specMaskHigh, rawMask);
+
+        vec3 normal = getNormal(v_uv);
+
+        vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
+
+        vec2 p = (v_uv - 0.5) * aspect;
+        vec2 lp = (u_lightUv - 0.5) * aspect;
+
+        vec3 pos = vec3(p, 0.0);
+        vec3 lightPos = vec3(lp, u_lightHeight);
+
+        vec3 L = normalize(lightPos - pos);
+        vec3 V = vec3(0.0, 0.0, 1.0);
+        vec3 H = normalize(L + V);
+
+        float ndotl = max(dot(normal, L), 0.0);
+        float ndoth = max(dot(normal, H), 0.0);
+        float ndotv = max(dot(normal, V), 0.0);
+
+        float dist = distance(p, lp);
+
+        float reveal = 1.0 - smoothstep(
+          u_highlightRadius,
+          u_highlightRadius + u_revealSoftness,
+          dist
+        );
+
+        // 鼠标不在图片区域内时，不显示金属 reveal。
+        reveal *= revealMask * u_lightActive;
+
+        float localLight = 1.0 - smoothstep(
+          u_highlightRadius * 0.12,
+          u_highlightRadius,
+          dist
+        );
+
+        // 鼠标不在图片区域内时，不显示局部高光。
+        localLight *= u_lightActive;
+
+        float baseLum = luminance(baseLinear);
+
+        // 石膏底色：保留 relief 原来的明暗，但不过度叠加光。
+        vec3 plaster = mix(u_plasterDark, u_plasterLight, baseLum);
+        plaster *= 0.88 + ndotl * 0.12;
+
+        // 亮黄金材质。
+        vec3 env = goldEnvironment(normal, V);
+        vec3 goldBase = mix(u_goldDark, u_goldMid, baseLum);
+
+        float diffuse = u_ambient + ndotl * u_lightPower;
+        float spec = pow(ndoth, u_specularPower) * u_specularIntensity;
+        float fresnel = pow(1.0 - ndotv, u_fresnelPower) * u_fresnelIntensity;
+
+        vec3 gold = goldBase * (0.38 + diffuse * 0.42);
+
+        // 金属环境反射，偏暖黄。
+        gold += env * (0.40 + fresnel * 0.65);
+
+        // 亮黄金主高光：更亮，但仍保持黄色，不使用纯白。
+        gold += u_goldLight * spec * specMask * (0.28 + localLight * 0.95);
+
+        // 鼠标附近扫光。
+        gold += vec3(1.0, 0.72, 0.24) * localLight * specMask * 0.10;
+
+        // 保留一点棕色暗部重量，避免变成黄色塑料。
+        gold = mix(gold, gold * vec3(0.72, 0.56, 0.36), 0.12);
+
+        // 亮黄金上限，防止过曝成白色。
+        gold = min(gold, vec3(1.0, 0.90, 0.55));
+
+        float vignette = 0.94 + 0.10 * smoothstep(
+          0.95,
+          0.0,
+          distance(v_uv, vec2(0.5))
+        );
+
+        vec3 bg = u_background * vignette;
+
+        vec3 objectColor = mix(plaster, gold, reveal);
+        vec3 color = mix(bg, objectColor, revealMask);
+
+        outColor = vec4(linearToSrgb(color), 1.0);
+      }
+    `;
+
+    function createShader(type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const message = gl.getShaderInfoLog(shader);
+        gl.deleteShader(shader);
+        throw new Error(message);
+      }
+
+      return shader;
+    }
+
+    function createProgram(vs, fs) {
+      const program = gl.createProgram();
+
+      gl.attachShader(program, createShader(gl.VERTEX_SHADER, vs));
+      gl.attachShader(program, createShader(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(program);
+
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        const message = gl.getProgramInfoLog(program);
+        gl.deleteProgram(program);
+        throw new Error(message);
+      }
+
+      return program;
+    }
+
+    function loadImage(url) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error('Failed to load: ' + url));
+
+        image.src = url + '?v=' + Date.now();
+      });
+    }
+
+    function createTextureFromImage(image) {
+      const texture = gl.createTexture();
+
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        image
+      );
+
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+      return texture;
+    }
+
+    async function main() {
+      const [baseImage, normalImage, maskImage] = await Promise.all([
+        loadImage(BASE_URL),
+        loadImage(NORMAL_URL),
+        loadImage(MASK_URL)
+      ]);
+
+      if (
+        baseImage.naturalWidth !== normalImage.naturalWidth ||
+        baseImage.naturalHeight !== normalImage.naturalHeight ||
+        baseImage.naturalWidth !== maskImage.naturalWidth ||
+        baseImage.naturalHeight !== maskImage.naturalHeight
+      ) {
+        console.warn(
+          '建议 relief / normal / mask 使用完全相同尺寸。当前尺寸：',
+          {
+            relief: [baseImage.naturalWidth, baseImage.naturalHeight],
+            normal: [normalImage.naturalWidth, normalImage.naturalHeight],
+            mask: [maskImage.naturalWidth, maskImage.naturalHeight]
+          }
+        );
+      }
+
+      const program = createProgram(vertexSource, fragmentSource);
+      gl.useProgram(program);
+
+      const positionBuffer = gl.createBuffer();
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+      gl.bufferData(
+        gl.ARRAY_BUFFER,
+        new Float32Array([
+          -1, -1,
+           1, -1,
+          -1,  1,
+          -1,  1,
+           1, -1,
+           1,  1
+        ]),
+        gl.STATIC_DRAW
+      );
+
+      const positionLocation = gl.getAttribLocation(program, 'a_position');
+      gl.enableVertexAttribArray(positionLocation);
+      gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+      const baseTexture = createTextureFromImage(baseImage);
+      const normalTexture = createTextureFromImage(normalImage);
+      const maskTexture = createTextureFromImage(maskImage);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, baseTexture);
+      gl.uniform1i(gl.getUniformLocation(program, 'u_base'), 0);
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, normalTexture);
+      gl.uniform1i(gl.getUniformLocation(program, 'u_normal'), 1);
+
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, maskTexture);
+      gl.uniform1i(gl.getUniformLocation(program, 'u_mask'), 2);
+
+      const uniforms = {
+        imageScale: gl.getUniformLocation(program, 'u_imageScale'),
+        lightUv: gl.getUniformLocation(program, 'u_lightUv'),
+        resolution: gl.getUniformLocation(program, 'u_resolution'),
+        lightActive: gl.getUniformLocation(program, 'u_lightActive'),
+
+        flipNormalY: gl.getUniformLocation(program, 'u_flipNormalY'),
+        normalStrength: gl.getUniformLocation(program, 'u_normalStrength'),
+
+        ambient: gl.getUniformLocation(program, 'u_ambient'),
+        lightPower: gl.getUniformLocation(program, 'u_lightPower'),
+        lightHeight: gl.getUniformLocation(program, 'u_lightHeight'),
+
+        highlightRadius: gl.getUniformLocation(program, 'u_highlightRadius'),
+        revealSoftness: gl.getUniformLocation(program, 'u_revealSoftness'),
+
+        specularPower: gl.getUniformLocation(program, 'u_specularPower'),
+        specularIntensity: gl.getUniformLocation(program, 'u_specularIntensity'),
+        fresnelPower: gl.getUniformLocation(program, 'u_fresnelPower'),
+        fresnelIntensity: gl.getUniformLocation(program, 'u_fresnelIntensity'),
+
+        revealMaskLow: gl.getUniformLocation(program, 'u_revealMaskLow'),
+        revealMaskHigh: gl.getUniformLocation(program, 'u_revealMaskHigh'),
+        specMaskLow: gl.getUniformLocation(program, 'u_specMaskLow'),
+        specMaskHigh: gl.getUniformLocation(program, 'u_specMaskHigh'),
+
+        plasterDark: gl.getUniformLocation(program, 'u_plasterDark'),
+        plasterLight: gl.getUniformLocation(program, 'u_plasterLight'),
+
+        goldDark: gl.getUniformLocation(program, 'u_goldDark'),
+        goldMid: gl.getUniformLocation(program, 'u_goldMid'),
+        goldLight: gl.getUniformLocation(program, 'u_goldLight'),
+
+        background: gl.getUniformLocation(program, 'u_background')
+      };
+
+      let imageScale = [1, 1];
+
+      // 存的是图片 UV，不是 canvas UV。
+      let targetLightUv = [0.5, 0.42];
+      let currentLightUv = [0.5, 0.42];
+
+      // 鼠标是否在实际图片区域内。图片外为 0，不产生光。
+      let targetLightActive = 0.0;
+      let currentLightActive = 0.0;
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+        const w = Math.floor(stage.clientWidth * dpr);
+        const h = Math.floor(stage.clientHeight * dpr);
+
+        canvas.width = w;
+        canvas.height = h;
+        canvas.style.width = stage.clientWidth + 'px';
+        canvas.style.height = stage.clientHeight + 'px';
+
+        gl.viewport(0, 0, w, h);
+
+        const canvasAspect = w / h;
+        const imageAspect = baseImage.naturalWidth / baseImage.naturalHeight;
+
+        // contain 模式：整张图可见。
+        if (canvasAspect > imageAspect) {
+          imageScale = [
+            imageAspect / canvasAspect * SETTINGS.reliefScale,
+            SETTINGS.reliefScale
+          ];
+        } else {
+          imageScale = [
+            SETTINGS.reliefScale,
+            canvasAspect / imageAspect * SETTINGS.reliefScale
+          ];
+        }
+      }
+
+      function pointerToImageUv(event) {
+        const rect = stage.getBoundingClientRect();
+
+        const px = event.clientX - rect.left;
+        const py = event.clientY - rect.top;
+
+        cursor.style.left = px + 'px';
+        cursor.style.top = py + 'px';
+
+        const canvasUvX = px / rect.width;
+        const canvasUvY = py / rect.height;
+
+        // 反算 contain 缩放后的图片 UV。
+        const imageU = (canvasUvX - 0.5) / imageScale[0] + 0.5;
+        const imageV = (canvasUvY - 0.5) / imageScale[1] + 0.5;
+
+        const isInsideImage =
+          imageU >= 0.0 &&
+          imageU <= 1.0 &&
+          imageV >= 0.0 &&
+          imageV <= 1.0;
+
+        return {
+          uv: [
+            Math.max(0, Math.min(1, imageU)),
+            Math.max(0, Math.min(1, imageV))
+          ],
+          active: isInsideImage ? 1.0 : 0.0
+        };
+      }
+
+      stage.addEventListener('pointermove', (event) => {
+        const result = pointerToImageUv(event);
+        targetLightUv = result.uv;
+        targetLightActive = result.active;
+      });
+
+      stage.addEventListener('pointerleave', () => {
+        targetLightUv = [0.5, 0.42];
+        targetLightActive = 0.0;
+      });
+
+      window.addEventListener('resize', resize);
+      resize();
+
+      function frame() {
+        currentLightUv[0] += (targetLightUv[0] - currentLightUv[0]) * 0.16;
+        currentLightUv[1] += (targetLightUv[1] - currentLightUv[1]) * 0.16;
+        currentLightActive += (targetLightActive - currentLightActive) * 0.22;
+
+        gl.useProgram(program);
+
+        gl.uniform2fv(uniforms.imageScale, imageScale);
+        gl.uniform2fv(uniforms.lightUv, currentLightUv);
+        gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
+        gl.uniform1f(uniforms.lightActive, currentLightActive);
+
+        gl.uniform1f(uniforms.flipNormalY, SETTINGS.flipNormalY ? 1.0 : 0.0);
+        gl.uniform1f(uniforms.normalStrength, SETTINGS.normalStrength);
+
+        gl.uniform1f(uniforms.ambient, SETTINGS.ambient);
+        gl.uniform1f(uniforms.lightPower, SETTINGS.lightPower);
+        gl.uniform1f(uniforms.lightHeight, SETTINGS.lightHeight);
+
+        gl.uniform1f(uniforms.highlightRadius, SETTINGS.highlightRadius);
+        gl.uniform1f(uniforms.revealSoftness, SETTINGS.revealSoftness);
+
+        gl.uniform1f(uniforms.specularPower, SETTINGS.specularPower);
+        gl.uniform1f(uniforms.specularIntensity, SETTINGS.specularIntensity);
+        gl.uniform1f(uniforms.fresnelPower, SETTINGS.fresnelPower);
+        gl.uniform1f(uniforms.fresnelIntensity, SETTINGS.fresnelIntensity);
+
+        gl.uniform1f(uniforms.revealMaskLow, SETTINGS.revealMaskLow);
+        gl.uniform1f(uniforms.revealMaskHigh, SETTINGS.revealMaskHigh);
+        gl.uniform1f(uniforms.specMaskLow, SETTINGS.specMaskLow);
+        gl.uniform1f(uniforms.specMaskHigh, SETTINGS.specMaskHigh);
+
+        gl.uniform3fv(uniforms.plasterDark, SETTINGS.plasterDark);
+        gl.uniform3fv(uniforms.plasterLight, SETTINGS.plasterLight);
+
+        gl.uniform3fv(uniforms.goldDark, SETTINGS.goldDark);
+        gl.uniform3fv(uniforms.goldMid, SETTINGS.goldMid);
+        gl.uniform3fv(uniforms.goldLight, SETTINGS.goldLight);
+
+        gl.uniform3fv(uniforms.background, SETTINGS.background);
+
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+        requestAnimationFrame(frame);
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    main().catch((error) => {
+      console.error(error);
+      document.body.innerHTML =
+        '<pre style="padding:24px;white-space:pre-wrap">' +
+        error.message +
+        '</pre>';
+    });
+  </script>
+</body>
+</html>
